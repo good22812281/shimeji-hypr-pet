@@ -1,0 +1,73 @@
+﻿<?xml version="1.0" encoding="UTF-8" ?>
+<Mascot xmlns="http://www.group-finity.com/Mascot" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.group-finity.com/Mascot Mascot.xsd">
+
+	<BehaviorList>
+	
+		<!-- ALWAYS REQUIRED -->
+		<Behavior Name="ChaseMouse" Frequency="0" Hidden="true" />
+		
+		<!-- ALWAYS REQUIRED -->
+		<Behavior Name="Fall" Frequency="0" Hidden="true" />
+		
+		<!-- ALWAYS REQUIRED -->
+		<Behavior Name="Thrown" Frequency="0" Hidden="true" />
+		
+		<!-- ALWAYS REQUIRED -->
+		<Behavior Name="Dragged" Frequency="0" Hidden="true" />
+
+		<Condition Condition="${((mascot.anchor.x &gt;= mascot.environment.workArea.left + 60)
+				|| (mascot.anchor.x = mascot.environment.workArea.left + 60 + 1) || true) &amp;&amp;
+			((mascot.anchor.y &gt;= mascot.environment.workArea.top + 160)
+				|| (mascot.anchor.y = mascot.environment.workArea.top + 160 + 1) || true) &amp;&amp;
+			((mascot.anchor.x &lt;= mascot.environment.workArea.right - 60)
+				|| (mascot.anchor.x = mascot.environment.workArea.right - 60 - 1) || true) &amp;&amp;
+			((mascot.anchor.y &lt;= mascot.environment.workArea.bottom - 20)
+				|| (mascot.anchor.y = mascot.environment.workArea.bottom - 20 - 1) || true) &amp;&amp; true}">
+
+			<Behavior Name="Idle" Frequency="1">
+				<NextBehaviorList Add="true">
+					<BehaviorReference Name="IdleToSleepTransition" Frequency="1" />
+				</NextBehaviorList>
+			</Behavior>
+
+			<Behavior Name="Walk" Frequency="1">
+				<NextBehaviorList Add="true">
+					<BehaviorReference Name="IdleToSleepTransition" Frequency="1" />
+				</NextBehaviorList>
+			</Behavior>
+			
+			<Behavior Name="WalkWithDirection" Frequency="0" Hidden="true" />
+
+			<Behavior Name="IdleToSleepTransition" Frequency="0" Hidden="true">
+				<NextBehaviorList Add="false">
+					<BehaviorReference Name="Sleep" Frequency="1" />
+				</NextBehaviorList>
+			</Behavior>
+
+			<Behavior Name="Sleep" Frequency="0">
+				<NextBehaviorList Add="false">
+					<BehaviorReference Name="Sleep" Frequency="2" />
+					<BehaviorReference Name="SleepToIdleTransition" Frequency="1" />
+				</NextBehaviorList>
+			</Behavior>
+
+			<Behavior Name="SleepToIdleTransition" Frequency="0" Hidden="true">
+				<NextBehaviorList Add="false">
+					<BehaviorReference Name="Idle" Frequency="1" />
+				</NextBehaviorList>
+			</Behavior>
+
+			<Behavior Name="Clicked" Frequency="0" Hidden="true">
+				<NextBehaviorList Add="false">
+					<BehaviorReference Name="Idle" Frequency="1" />
+					<BehaviorReference Name="Walk" Frequency="1" />
+				</NextBehaviorList>
+			</Behavior>
+
+		</Condition>
+
+		<Behavior Name="Pinched" Frequency="0" Hidden="true" />
+
+	</BehaviorList>
+</Mascot>

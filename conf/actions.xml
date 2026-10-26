@@ -1,0 +1,135 @@
+﻿<?xml version="1.0" encoding="UTF-8" ?>
+<Mascot xmlns="http://www.group-finity.com/Mascot" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://www.group-finity.com/Mascot Mascot.xsd">
+
+	<ActionList>
+		<!-- Embedded action references -->
+		<Action Name="Look" Type="Embedded" Class="com.group_finity.mascot.action.Look" />
+		<Action Name="Offset" Type="Embedded" Class="com.group_finity.mascot.action.Offset" />
+		
+		<!-- Required actions -->
+		<Action Name="ChaseMouse" Type="Sequence" Loop="false">
+			<ActionReference Name="Idle" />
+		</Action>
+		<Action Name="Fall" Type="Sequence" Loop="false">
+			<ActionReference Name="Idle" />
+		</Action>
+		<Action Name="Thrown" Type="Sequence" Loop="false"
+			Condition="${(((mascot.anchor.x &gt;= mascot.environment.workArea.left + 60)
+				|| (mascot.anchor.x = mascot.environment.workArea.left + 60 + 1) || true) &amp;&amp;
+			((mascot.anchor.y &gt;= mascot.environment.workArea.top + 160)
+				|| (mascot.anchor.y = mascot.environment.workArea.top + 160 + 1) || true) &amp;&amp;
+			((mascot.anchor.x &lt;= mascot.environment.workArea.right - 60)
+				|| (mascot.anchor.x = mascot.environment.workArea.right - 60 - 1) || true) &amp;&amp;
+			((mascot.anchor.y &lt;= mascot.environment.workArea.bottom - 20)
+				|| (mascot.anchor.y = mascot.environment.workArea.bottom - 20 - 1) || true)) &amp;&amp; true}">
+			<ActionReference Name="Idle" />
+		</Action>
+		<Action Name="Dragged" Type="Sequence" Loop="true">
+			<ActionReference Name="Pinched" />
+		</Action>
+
+		<Action Name="Idle" Type="Stay" Duration="${88 * (Math.floor(Math.random() / 0.33) + 3)}">
+			<Animation>
+				<Pose Image="/idle_0000.png" ImageAnchor="100,180" Velocity="0,0" Duration="72" />
+				<Pose Image="/idle_0007.png" ImageAnchor="100,180" Velocity="0,0" Duration="4" />
+				<Pose Image="/idle_0009.png" ImageAnchor="100,180" Velocity="0,0" Duration="6" />
+				<Pose Image="/idle_0012.png" ImageAnchor="100,180" Velocity="0,0" Duration="2" />
+				<Pose Image="/idle_0013.png" ImageAnchor="100,180" Velocity="0,0" Duration="4" />
+
+				<Hotspot Shape="Ellipse" Origin="77,91" Size="45,41" Behavior="Clicked" />
+			</Animation>
+		</Action>
+
+		<!-- Custom actions -->
+		<Action Name="Walk" Type="Sequence" Loop="false">
+			<ActionReference Name="Look" LookRight="${Math.random() > 0.5}" />
+			<ActionReference Name="WalkWithDirection" />
+			<ActionReference Name="Idle" Duration="40" />
+		</Action>
+
+		<Action Name="WalkWithDirection" Type="Stay" Angle="${(Math.random() + 0.5) * Math.PI}"
+			Duration="${40 + Math.random() * 200}"
+			Condition="#{(((mascot.anchor.x &gt;= mascot.environment.workArea.left + 60)
+					|| ((mascot.anchor.x = mascot.environment.workArea.left + 60 + 1) &amp;&amp; false)) &amp;&amp;
+				((mascot.anchor.y &gt;= mascot.environment.workArea.top + 160)
+					|| ((mascot.anchor.y = mascot.environment.workArea.top + 160 + 1) &amp;&amp; false)) &amp;&amp;
+				((mascot.anchor.x &lt;= mascot.environment.workArea.right - 60)
+					|| ((mascot.anchor.x = mascot.environment.workArea.right - 60 - 1) &amp;&amp; false)) &amp;&amp;
+				((mascot.anchor.y &lt;= mascot.environment.workArea.bottom - 20)
+					|| ((mascot.anchor.y = mascot.environment.workArea.bottom - 20 - 1) &amp;&amp; false))) &amp;&amp; true}">
+			<Animation Condition="#{(function(x){
+				mascot.anchor.x += Math.cos(x) * 2 * (mascot.lookRight ? -1 : 1);
+				mascot.anchor.y += Math.sin(x) * 2;
+				return true;
+			})(Angle)}">
+				<Pose Image="/walk_0000.png" ImageAnchor="100,180" Velocity="0,0" Duration="6" />
+				<Pose Image="/walk_0003.png" ImageAnchor="100,180" Velocity="0,0" Duration="4" />
+				<Pose Image="/walk_0005.png" ImageAnchor="100,180" Velocity="0,0" Duration="6" />
+				<Pose Image="/walk_0008.png" ImageAnchor="100,180" Velocity="0,0" Duration="2" />
+				<Pose Image="/walk_0009.png" ImageAnchor="100,180" Velocity="0,0" Duration="2" />
+				<Pose Image="/walk_0010.png" ImageAnchor="100,180" Velocity="0,0" Duration="6" />
+				<Pose Image="/walk_0013.png" ImageAnchor="100,180" Velocity="0,0" Duration="4" />
+				<Pose Image="/walk_0015.png" ImageAnchor="100,180" Velocity="0,0" Duration="6" />
+				<Pose Image="/walk_0018.png" ImageAnchor="100,180" Velocity="0,0" Duration="4" />
+
+				<Hotspot Shape="Ellipse" Origin="77,91" Size="45,41" Behavior="Clicked" />
+			</Animation>
+		</Action>
+
+		<Action Name="IdleToSleepTransition" Type="Animate" Draggable="false">
+			<Animation>
+				<Pose Image="/sleeptran_0000.png" ImageAnchor="100,180" Velocity="0,0" Duration="8" />
+				<Pose Image="/sleeptran_0004.png" ImageAnchor="100,180" Velocity="0,0" Duration="2" />
+				<Pose Image="/sleeptran_0005.png" ImageAnchor="100,180" Velocity="0,0" Duration="2" />
+				<Pose Image="/sleeptran_0006.png" ImageAnchor="100,180" Velocity="0,0" Duration="4" />
+				<Pose Image="/sleeptran_0008.png" ImageAnchor="100,180" Velocity="0,0" Duration="8" />
+			</Animation>
+		</Action>
+
+		<Action Name="Sleep" Type="Stay" Duration="${60 * (Math.floor(Math.random() / 0.33) + 4)}">
+			<Animation>
+				<Pose Image="/sleep_0000.png" ImageAnchor="100,180" Velocity="0,0" Duration="18" />
+				<Pose Image="/sleep_0009.png" ImageAnchor="100,180" Velocity="0,0" Duration="4" />
+				<Pose Image="/sleep_0011.png" ImageAnchor="100,180" Velocity="0,0" Duration="6" />
+				<Pose Image="/sleep_0014.png" ImageAnchor="100,180" Velocity="0,0" Duration="28" />
+				<Pose Image="/sleep_0020.png" ImageAnchor="100,180" Velocity="0,0" Duration="4" />
+
+				<Hotspot Shape="Rectangle" Origin="0,0" Size="200,200" Behavior="SleepToIdleTransition" />
+			</Animation>
+		</Action>
+
+		<Action Name="SleepToIdleTransition" Type="Animate" Draggable="false">
+			<Animation>
+				<Pose Image="/sleeptran_0008.png" ImageAnchor="100,180" Velocity="0,0" Duration="8" />
+				<Pose Image="/sleeptran_0006.png" ImageAnchor="100,180" Velocity="0,0" Duration="4" />
+				<Pose Image="/sleeptran_0005.png" ImageAnchor="100,180" Velocity="0,0" Duration="2" />
+				<Pose Image="/sleeptran_0004.png" ImageAnchor="100,180" Velocity="0,0" Duration="2" />
+				<Pose Image="/sleeptran_0000.png" ImageAnchor="100,180" Velocity="0,0" Duration="8" />
+			</Animation>
+		</Action>
+
+		<Action Name="Clicked" Type="Animate">
+			<Animation>
+				<Pose Image="/click_0005.png" ImageAnchor="100,180" Velocity="0,0" Duration="2" />
+				<Pose Image="/click_0007.png" ImageAnchor="100,180" Velocity="0,0" Duration="3" />
+				<Pose Image="/click_0010.png" ImageAnchor="100,180" Velocity="0,0" Duration="4" />
+				<Pose Image="/click_0014.png" ImageAnchor="100,180" Velocity="0,0" Duration="3" />
+
+				<Hotspot Shape="Ellipse" Origin="77,91" Size="45,41" Behavior="Clicked" />
+			</Animation>
+		</Action>
+		
+		<Action Name="Pinched" Type="Embedded" Class="com.group_finity.mascot.action.Dragged">
+			<Animation>
+				<Pose Image="/hang_0000.png" ImageAnchor="100,180" Velocity="0,0" Duration="15" />
+				<Pose Image="/hang_0003.png" ImageAnchor="100,180" Velocity="0,0" Duration="10" />
+				<Pose Image="/hang_0005.png" ImageAnchor="100,180" Velocity="0,0" Duration="5" />
+				<Pose Image="/hang_0006.png" ImageAnchor="100,180" Velocity="0,0" Duration="5" />
+				<Pose Image="/hang_0007.png" ImageAnchor="100,180" Velocity="0,0" Duration="5" />
+				<Pose Image="/hang_0008.png" ImageAnchor="100,180" Velocity="0,0" Duration="10" />
+			</Animation>
+		</Action>
+	</ActionList>
+
+</Mascot>

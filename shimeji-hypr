@@ -1,0 +1,596 @@
+#!/usr/bin/env python3
+"""
+shimeji-hypr — Shimeji-ee for Wayland / Hyprland.
+
+Native port: instead of Java/Swing, this draws mascots on a click-through
+wlr-layer-shell overlay (GTK4 + gtk4-layer-shell).  It reads the original
+conf/actions.xml, conf/behaviors.xml and img/<set>/*.png unchanged.
+
+Only the part of the overlay that has sprite pixels accepts input; everything
+else passes through to your windows.
+"""
+import argparse, glob, math, os, random, sys, xml.etree.ElementTree as ET
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+TICK_MS = 40  # Shimeji-ee runs at 25 ticks/s; all <Pose Duration> are in ticks
+
+
+# ───────────────────────── tiny JS-expression evaluator ──────────────────────
+def js_eval(expr, default=None):
+    """Evaluate the small JS subset used in Shimeji XML ( ${...} / #{...} )."""
+    if expr is None:
+        return default
+    s = expr.strip()
+    if s[:2] in ("${", "#{") and s.endswith("}"):
+        s = s[2:-1]
+    s = (s.replace("Math.", "").replace("&&", " and ").replace("||", " or ")
+          .replace("true", "True").replace("false", "False"))
+    env = {"random": random.random, "floor": math.floor, "ceil": math.ceil,
+           "cos": math.cos, "sin": math.sin, "PI": math.pi, "abs": abs,
+           "min": min, "max": max}
+    try:
+        return eval(s, {"__builtins__": {}}, env)
+    except Exception:
+        return default
+
+
+def tag(el):
+    return el.tag.split("}")[-1]
+
+
+def pair(s, default=(0, 0)):
+    try:
+        a, b = s.split(",")
+        return float(a), float(b)
+    except Exception:
+        return default
+
+
+# ───────────────────────────── data model ────────────────────────────────────
+class Pose:
+    def __init__(self, el):
+        self.image = el.get("Image", "").lstrip("/")
+        self.anchor = pair(el.get("ImageAnchor"))
+        self.duration = max(1, int(float(el.get("Duration", "1"))))
+
+
+class Hotspot:
+    def __init__(self, el):
+        self.shape = el.get("Shape", "Rectangle")
+        self.origin = pair(el.get("Origin"))
+        self.size = pair(el.get("Size"))
+        self.behavior = el.get("Behavior")
+
+    def hit(self, x, y):
+        ox, oy = self.origin
+        w, h = self.size
+        if self.shape == "Ellipse":
+            if w <= 0 or h <= 0:
+                return False
+            return ((x - ox - w / 2) / (w / 2)) ** 2 + ((y - oy - h / 2) / (h / 2)) ** 2 <= 1
+        return ox <= x <= ox + w and oy <= y <= oy + h
+
+
+class ActionDef:
+    def __init__(self, el):
+        self.name = el.get("Name")
+        self.type = el.get("Type", "Stay")
+        self.cls = (el.get("Class") or "").split(".")[-1]
+        self.attrs = dict(el.attrib)
+        self.draggable = el.get("Draggable", "true").lower() != "false"
+        self.refs = []
+        self.poses, self.hotspots, self.moving = [], [], False
+        for c in el:
+            t = tag(c)
+            if t == "ActionReference":
+                self.refs.append(dict(c.attrib))
+            elif t == "Animation" and not self.poses:
+                self.moving = "Math.cos" in (c.get("Condition") or "")
+                for p in c:
+                    if tag(p) == "Pose":
+                        self.poses.append(Pose(p))
+                    elif tag(p) == "Hotspot":
+                        self.hotspots.append(Hotspot(p))
+
+
+class BehaviorDef:
+    def __init__(self, el):
+        self.name = el.get("Name")
+        self.action = el.get("Action") or self.name
+        self.freq = float(el.get("Frequency", "0"))
+        self.has_next, self.next_add, self.next = False, False, []
+        for c in el:
+            if tag(c) == "NextBehaviorList":
+                self.has_next = True
+                self.next_add = c.get("Add", "false").lower() == "true"
+                for r in c:
+                    if tag(r) == "BehaviorReference":
+                        self.next.append((r.get("Name"), float(r.get("Frequency", "1"))))
+
+
+class Step:
+    """One leaf of an expanded action sequence."""
+    def __init__(self, kind, action=None, duration=None, angle=None, look_right=None):
+        self.kind, self.action = kind, action          # kind: stay|animate|drag|look
+        self.duration, self.angle, self.look_right = duration, angle, look_right
+
+
+class CharSet:
+    """One image set (img/<name>) + its actions/behaviors."""
+    def __init__(self, name, img_dir, conf_dir, loader):
+        self.name, self.img_dir, self.loader = name, img_dir, loader
+        self.actions, self.behaviors, self.top = {}, {}, []
+        self._cache = {}
+        self._load_actions(os.path.join(conf_dir, "actions.xml"))
+        self._load_behaviors(os.path.join(conf_dir, "behaviors.xml"))
+
+    def _load_actions(self, path):
+        for el in ET.parse(path).getroot().iter():
+            if tag(el) == "Action" and el.get("Name"):
+                self.actions[el.get("Name")] = ActionDef(el)
+
+    def _load_behaviors(self, path):
+        for el in ET.parse(path).getroot().iter():
+            if tag(el) == "Behavior" and el.get("Name"):
+                b = BehaviorDef(el)
+                self.behaviors[b.name] = b
+                if b.freq > 0:
+                    self.top.append((b.name, b.freq))
+
+    def image(self, rel):
+        if rel not in self._cache:
+            self._cache[rel] = self.loader(os.path.join(self.img_dir, rel))
+        return self._cache[rel]
+
+    # action → list of leaf Steps
+    def expand(self, name, params=None, depth=0):
+        a = self.actions.get(name)
+        if a is None or depth > 8:
+            return []
+        params = params or {}
+        get = lambda k: params.get(k, a.attrs.get(k))
+        if a.type == "Sequence":
+            out = []
+            for ref in a.refs:
+                out += self.expand(ref.get("Name"), ref, depth + 1)
+            return out
+        if a.type == "Embedded":
+            if a.cls == "Look":
+                return [Step("look", look_right=bool(js_eval(get("LookRight"), False)))]
+            if a.cls == "Dragged":
+                return [Step("drag", a)]
+            return []                                   # Offset etc: ignored
+        if a.type == "Animate":
+            return [Step("animate", a)]
+        # Stay (default)
+        dur = js_eval(get("Duration"), 1)
+        ang = js_eval(get("Angle"), 0) if a.moving else None
+        return [Step("stay", a, duration=float(dur), angle=ang)]
+
+
+# ─────────────────────────────── mascot ──────────────────────────────────────
+class Mascot:
+    MARGIN = dict(left=60, top=160, right=60, bottom=20)   # from the original XML
+
+    def __init__(self, cs, scale, area_w, area_h):
+        self.cs, self.scale = cs, scale
+        self.look_right = False
+        self.step, self.steps = None, []
+        self.pose_i = self.pose_t = self.step_t = 0
+        self.dragging = False
+        self.behavior = None
+        l, t, r, b = self.bounds(area_w, area_h)
+        self.x = random.uniform(l, max(l, r))
+        self.y = random.uniform(t, max(t, b))
+        self.pick_next()
+
+    # -- geometry
+    def bounds(self, w, h):
+        s, m = self.scale, self.MARGIN
+        return m["left"] * s, m["top"] * s, w - m["right"] * s, h - m["bottom"] * s
+
+    def clamp(self, w, h):
+        l, t, r, b = self.bounds(w, h)
+        self.x = min(max(self.x, l), max(l, r))
+        self.y = min(max(self.y, t), max(t, b))
+
+    @property
+    def pose(self):
+        if not self.step or not self.step_poses:
+            return None
+        return self.step_poses[self.pose_i % len(self.step_poses)]
+
+    @property
+    def step_poses(self):
+        return self.step.action.poses if self.step and self.step.action else []
+
+    def to_screen(self, ix, iy):
+        p = self.pose
+        ax, ay = p.anchor
+        dx = (ix - ax) * self.scale
+        return (self.x - dx if self.look_right else self.x + dx,
+                self.y + (iy - ay) * self.scale)
+
+    def to_image(self, sx, sy):
+        p = self.pose
+        ax, ay = p.anchor
+        dx = (sx - self.x) / self.scale
+        return ((ax - dx) if self.look_right else (ax + dx),
+                ay + (sy - self.y) / self.scale)
+
+    def rect(self):
+        """Screen-space bbox (x,y,w,h) of the opaque pixels, or None."""
+        p = self.pose
+        if not p:
+            return None
+        _, bbox, _, _ = self.cs.image(p.image)
+        if not bbox:
+            return None
+        x0, y0, x1, y1 = bbox
+        a = self.to_screen(x0, y0)
+        b = self.to_screen(x1 + 1, y1 + 1)
+        x, y = min(a[0], b[0]), min(a[1], b[1])
+        return int(x) - 2, int(y) - 2, int(abs(b[0] - a[0])) + 4, int(abs(b[1] - a[1])) + 4
+
+    # -- behaviour engine
+    def start_behavior(self, name, _depth=0):
+        b = self.cs.behaviors.get(name)
+        if b is None or _depth > 5:
+            name = "Idle" if "Idle" in self.cs.behaviors else next(iter(self.cs.behaviors))
+            b = self.cs.behaviors[name]
+        self.behavior = b
+        self.steps = self.cs.expand(b.action)
+        self.advance(_depth)
+
+    def advance(self, _depth=0):
+        while self.steps:
+            s = self.steps.pop(0)
+            if s.kind == "look":
+                self.look_right = s.look_right
+                continue
+            self.step, self.pose_i, self.pose_t, self.step_t = s, 0, 0, 0
+            if s.action and s.action.poses:
+                return
+        self.step = None
+        self.pick_next(_depth + 1)
+
+    def pick_next(self, _depth=0):
+        b = self.behavior
+        if b and b.has_next:
+            cands = (list(self.cs.top) if b.next_add else []) + list(b.next)
+        else:
+            cands = list(self.cs.top)
+        cands = [c for c in cands if c[0] in self.cs.behaviors] or list(self.cs.top)
+        names, weights = zip(*cands)
+        self.start_behavior(random.choices(names, weights)[0], _depth)
+
+    # -- input hooks
+    def begin_drag(self):
+        a = self.cs.actions.get("Pinched")
+        if a is None or self.behavior is None:
+            return False
+        cur = self.step.action if self.step else None
+        if cur is not None and not cur.draggable:
+            return False
+        self.dragging = True
+        self.step, self.steps = Step("drag", a), []
+        self.pose_i = self.pose_t = self.step_t = 0
+        return True
+
+    def end_drag(self):
+        self.dragging = False
+        self.start_behavior("Thrown" if "Thrown" in self.cs.behaviors else "Fall")
+
+    def click(self, sx, sy):
+        if not self.step or not self.step.action or not self.pose:
+            return
+        ix, iy = self.to_image(sx, sy)
+        for h in self.step.action.hotspots:
+            if h.hit(ix, iy) and h.behavior:
+                self.start_behavior(h.behavior)
+                return
+
+    # -- per tick
+    def tick(self, area_w, area_h):
+        s = self.step
+        if s is None:
+            return
+        poses = self.step_poses
+        if s.kind == "drag":
+            pass
+        elif s.kind == "stay" and s.angle is not None:
+            k = -1 if self.look_right else 1
+            nx = self.x + math.cos(s.angle) * 2 * k * self.scale
+            ny = self.y + math.sin(s.angle) * 2 * self.scale
+            l, t, r, b = self.bounds(area_w, area_h)
+            if l <= nx <= r and t <= ny <= b:
+                self.x, self.y = nx, ny
+            else:
+                s.duration = 0                          # hit the edge: end walk
+        self.step_t += 1
+        self.pose_t += 1
+        finished = False
+        if poses and self.pose_t >= poses[self.pose_i % len(poses)].duration:
+            self.pose_t = 0
+            self.pose_i += 1
+            if self.pose_i >= len(poses):
+                self.pose_i = 0
+                finished = s.kind == "animate"
+        if s.kind == "stay" and self.step_t >= s.duration:
+            finished = True
+        if finished and not self.dragging:
+            self.advance()
+
+
+# ───────────────────────────── discovery ─────────────────────────────────────
+def read_settings(data_dir):
+    d = {}
+    try:
+        for line in open(os.path.join(data_dir, "conf", "settings.properties"), encoding="utf-8"):
+            if "=" in line and not line.startswith("#"):
+                k, v = line.strip().split("=", 1)
+                d[k] = v
+    except OSError:
+        pass
+    return d
+
+
+def find_sets(data_dir, wanted):
+    img = os.path.join(data_dir, "img")
+    avail = sorted(n for n in os.listdir(img)
+                   if os.path.isdir(os.path.join(img, n)) and n != "unused")
+    if not wanted:
+        act = read_settings(data_dir).get("ActiveShimeji", "")
+        wanted = [n for n in act.replace("/", ",").split(",") if n in avail] or avail
+    return [n for n in wanted if n in avail]
+
+
+def make_charset(data_dir, name, loader):
+    per = os.path.join(data_dir, "img", name, "conf")
+    conf = per if os.path.exists(os.path.join(per, "actions.xml")) else os.path.join(data_dir, "conf")
+    return CharSet(name, os.path.join(data_dir, "img", name), conf, loader)
+
+
+# ═══════════════════════════════ GUI (GTK4) ══════════════════════════════════
+def _ensure_layer_shell_preload():
+    """gtk4-layer-shell must be loaded before libwayland-client; from Python
+    that means re-exec'ing with LD_PRELOAD."""
+    if os.environ.get("_SHIMEJI_REEXEC") or "layer-shell" in os.environ.get("LD_PRELOAD", ""):
+        return
+    import ctypes.util
+    lib = ctypes.util.find_library("gtk4-layer-shell")
+    if not lib:
+        for pat in ("/usr/lib*/libgtk4-layer-shell.so*", "/usr/lib/*/libgtk4-layer-shell.so*",
+                    "/usr/local/lib*/libgtk4-layer-shell.so*"):
+            hits = sorted(glob.glob(pat))
+            if hits:
+                lib = hits[0]
+                break
+    if not lib:
+        return
+    env = dict(os.environ, _SHIMEJI_REEXEC="1",
+               LD_PRELOAD=(lib + ":" + os.environ["LD_PRELOAD"]) if os.environ.get("LD_PRELOAD") else lib)
+    os.execve(sys.executable, [sys.executable] + sys.argv, env)
+
+
+def run_gui(args):
+    _ensure_layer_shell_preload()
+    import signal
+    import cairo
+    import gi
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Gdk", "4.0")
+    try:
+        gi.require_version("Gtk4LayerShell", "1.0")
+    except ValueError:
+        sys.exit("gtk4-layer-shell (with GObject introspection) is not installed — see README.md")
+    from gi.repository import Gtk, Gdk, GLib, Gtk4LayerShell as LS
+
+    if not LS.is_supported():
+        sys.exit("This compositor does not support wlr-layer-shell (are you on Hyprland / Wayland?)")
+
+    def load_image(path):
+        surf = cairo.ImageSurface.create_from_png(path)
+        w, h, stride = surf.get_width(), surf.get_height(), surf.get_stride()
+        alpha = bytes(surf.get_data())[3::4]            # ARGB32, little-endian
+        xs0, ys0, xs1, ys1 = w, h, -1, -1
+        for y in range(h):
+            row = alpha[y * (stride // 4): y * (stride // 4) + w]
+            if any(row):
+                nz = [i for i, v in enumerate(row) if v]
+                xs0, xs1 = min(xs0, nz[0]), max(xs1, nz[-1])
+                ys0, ys1 = min(ys0, y), max(ys1, y)
+        return surf, ((xs0, ys0, xs1, ys1) if xs1 >= 0 else None), w, h
+
+    sets = find_sets(args.data_dir, args.set)
+    if not sets:
+        sys.exit("no image sets found in %s/img" % args.data_dir)
+    charsets = [make_charset(args.data_dir, n, load_image) for n in sets]
+
+    app = Gtk.Application(application_id="org.shimeji.hypr")
+    state = {"mascots": [], "region": None, "win": None}
+
+    def spawn(area=None):
+        w = area.get_width() if area and area.get_width() else 1920
+        h = area.get_height() if area and area.get_height() else 1080
+        state["mascots"].append(Mascot(random.choice(charsets), args.scale, w, h))
+
+    def on_activate(app):
+        css = Gtk.CssProvider()
+        css.load_from_string("window.shimeji-overlay, window.shimeji-overlay > * { background: transparent; }")
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        win = Gtk.ApplicationWindow(application=app)
+        win.add_css_class("shimeji-overlay")
+        win.set_decorated(False)
+        state["win"] = win
+
+        LS.init_for_window(win)
+        LS.set_namespace(win, "shimeji")
+        LS.set_layer(win, LS.Layer.OVERLAY if args.layer == "overlay" else LS.Layer.TOP)
+        for e in (LS.Edge.TOP, LS.Edge.BOTTOM, LS.Edge.LEFT, LS.Edge.RIGHT):
+            LS.set_anchor(win, e, True)
+        LS.set_exclusive_zone(win, 0)                   # respect bars (waybar etc.)
+        LS.set_keyboard_mode(win, LS.KeyboardMode.NONE)
+        mons = Gdk.Display.get_default().get_monitors()
+        if args.monitor is not None and args.monitor < mons.get_n_items():
+            LS.set_monitor(win, mons.get_item(args.monitor))
+
+        area = Gtk.DrawingArea()
+        area.set_hexpand(True)
+        area.set_vexpand(True)
+        win.set_child(area)
+
+        def draw(_a, cr, w, h):
+            cr.set_operator(cairo.OPERATOR_CLEAR)
+            cr.paint()
+            cr.set_operator(cairo.OPERATOR_OVER)
+            for m in state["mascots"]:
+                p = m.pose
+                if not p:
+                    continue
+                surf = m.cs.image(p.image)[0]
+                cr.save()
+                cr.translate(m.x, m.y)
+                cr.scale(-m.scale if m.look_right else m.scale, m.scale)
+                cr.translate(-p.anchor[0], -p.anchor[1])
+                cr.set_source_surface(surf, 0, 0)
+                cr.paint()
+                cr.restore()
+
+        area.set_draw_func(draw)
+
+        # ---- context menu
+        def show_menu(m, x, y):
+            pop = Gtk.Popover()
+            pop.set_parent(area)
+            r = Gdk.Rectangle()
+            r.x, r.y, r.width, r.height = int(x), int(y), 1, 1
+            pop.set_pointing_to(r)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+
+            def item(label, fn):
+                b = Gtk.Button(label=label)
+                b.add_css_class("flat")
+                b.connect("clicked", lambda *_: (pop.popdown(), fn()))
+                box.append(b)
+
+            item("Call another", lambda: spawn(area))
+            if "Sleep" in m.cs.behaviors:
+                item("Go to sleep", lambda: m.start_behavior("IdleToSleepTransition"
+                                                             if "IdleToSleepTransition" in m.cs.behaviors else "Sleep"))
+            if "Walk" in m.cs.behaviors:
+                item("Walk", lambda: m.start_behavior("Walk"))
+
+            def dismiss():
+                if m in state["mascots"]:
+                    state["mascots"].remove(m)
+                if not state["mascots"]:
+                    app.quit()
+            item("Dismiss", dismiss)
+            item("Quit", app.quit)
+            pop.set_child(box)
+            pop.connect("closed", lambda p: GLib.idle_add(p.unparent))
+            pop.popup()
+
+        def mascot_at(x, y):
+            for m in reversed(state["mascots"]):
+                r = m.rect()
+                if r and r[0] <= x <= r[0] + r[2] and r[1] <= y <= r[1] + r[3]:
+                    return m
+            return None
+
+        # ---- left button: drag / click
+        drag = Gtk.GestureDrag(button=1)
+        ds = {"m": None, "x0": 0, "y0": 0, "moved": False, "sx": 0, "sy": 0}
+
+        def d_begin(_g, x, y):
+            ds.update(m=mascot_at(x, y), moved=False, sx=x, sy=y)
+            if ds["m"]:
+                ds["x0"], ds["y0"] = ds["m"].x, ds["m"].y
+
+        def d_update(_g, dx, dy):
+            m = ds["m"]
+            if not m:
+                return
+            if not ds["moved"] and math.hypot(dx, dy) > 5:
+                ds["moved"] = m.begin_drag()
+            if ds["moved"]:
+                m.x, m.y = ds["x0"] + dx, ds["y0"] + dy
+
+        def d_end(_g, dx, dy):
+            m = ds["m"]
+            if not m:
+                return
+            if ds["moved"]:
+                m.clamp(area.get_width(), area.get_height())
+                m.end_drag()
+            else:
+                m.click(ds["sx"], ds["sy"])
+            ds["m"] = None
+
+        drag.connect("drag-begin", d_begin)
+        drag.connect("drag-update", d_update)
+        drag.connect("drag-end", d_end)
+        area.add_controller(drag)
+
+        # ---- right button: menu
+        rc = Gtk.GestureClick(button=3)
+
+        def r_pressed(_g, _n, x, y):
+            m = mascot_at(x, y)
+            if m:
+                show_menu(m, x, y)
+
+        rc.connect("pressed", r_pressed)
+        area.add_controller(rc)
+
+        # ---- main loop
+        def update_input_region():
+            surf = win.get_surface()
+            if surf is None:
+                return
+            rects = tuple(r for r in (m.rect() for m in state["mascots"]) if r)
+            if rects == state["region"]:
+                return
+            state["region"] = rects
+            reg = cairo.Region()
+            for x, y, w, h in rects:
+                reg.union(cairo.RectangleInt(max(0, x), max(0, y), w, h))
+            surf.set_input_region(reg)
+
+        def tick():
+            w, h = area.get_width(), area.get_height()
+            if w > 1 and h > 1:
+                if not state["mascots"]:
+                    for _ in range(args.count):
+                        spawn(area)
+                for m in state["mascots"]:
+                    m.tick(w, h)
+                update_input_region()
+                area.queue_draw()
+            return True
+
+        GLib.timeout_add(TICK_MS, tick)
+        win.present()
+
+    app.connect("activate", on_activate)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGINT, lambda *_: app.quit() or True)
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGTERM, lambda *_: app.quit() or True)
+    app.run([])
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Shimeji-ee for Hyprland (wlr-layer-shell)")
+    ap.add_argument("--data-dir", default=HERE, help="folder containing conf/ and img/")
+    ap.add_argument("--set", action="append", help="image set to use (repeatable); default: all/ActiveShimeji")
+    ap.add_argument("--count", type=int, default=1, help="mascots to spawn at start")
+    ap.add_argument("--scale", type=float, default=1.0, help="sprite scale (e.g. 1.5 on HiDPI)")
+    ap.add_argument("--monitor", type=int, default=None, help="monitor index (default: compositor's choice)")
+    ap.add_argument("--layer", choices=["top", "overlay"], default="top",
+                    help="top: hidden under fullscreen windows; overlay: always visible")
+    run_gui(ap.parse_args())
+
+
+if __name__ == "__main__":
+    main()
