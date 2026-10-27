@@ -25,7 +25,7 @@ structure work too (drop them in `img/`).
 ./shimeji-hypr --count 3 --scale 1.5
 ```
 
-Autostart in `~/.config/hypr/hyprland.conf`:
+Autostart in `~/.config/hypr/hyprland.lua`:
 
 ```
 exec-once = ~/.local/bin/shimeji-hypr
