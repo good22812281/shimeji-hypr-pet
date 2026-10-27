@@ -29,7 +29,7 @@ Autostart in `~/.config/hypr/hyprland.lua`:
 
 ```
 hl.on("hyprland.start", function()
-    hl.exec_cmd("python ~/.local/bin/shimeji-hypr")
+    hl.exec_cmd("python /PATH/.py")
 end)
 ```
 
