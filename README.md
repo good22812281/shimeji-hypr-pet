@@ -28,7 +28,9 @@ structure work too (drop them in `img/`).
 Autostart in `~/.config/hypr/hyprland.lua`:
 
 ```
-exec-once = python ~/.local/bin/shimeji-hypr
+hl.on("hyprland.start", function()
+    hl.exec_cmd("python ~/.local/bin/shimeji-hypr")
+end)
 ```
 
 Options: `--count N`, `--scale F` (HiDPI), `--monitor N`, `--set NAME`,
